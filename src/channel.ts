@@ -37,9 +37,13 @@ function setCachedMemberName(groupId: string, userId: string, name: string) {
 
 function extractImageUrls(message: OneBotMessage | string | undefined, maxImages = 3): string[] {
   const urls: string[] = [];
+  console.log(`[QQ] extractImageUrls: input type = ${typeof message}, isArray = ${Array.isArray(message)}`);
 
   if (Array.isArray(message)) {
-    for (const segment of message) {
+    console.log(`[QQ] extractImageUrls: processing array message, length = ${message.length}`);
+    for (let i = 0; i < message.length; i++) {
+      const segment = message[i];
+      console.log(`[QQ] extractImageUrls: segment[${i}] = ${JSON.stringify(segment)}`);
       if (segment.type === "image") {
         // 优先使用 url 字段
         let url = segment.data?.url;
@@ -47,6 +51,7 @@ function extractImageUrls(message: OneBotMessage | string | undefined, maxImages
         if (!url && segment.data?.file) {
           url = segment.data.file;
         }
+        console.log(`[QQ] extractImageUrls: extracted image url = ${url}`);
         if (url) {
           urls.push(url);
           if (urls.length >= maxImages) break;
@@ -54,15 +59,18 @@ function extractImageUrls(message: OneBotMessage | string | undefined, maxImages
       }
     }
   } else if (typeof message === "string") {
+    console.log(`[QQ] extractImageUrls: processing string message, length = ${message?.length}`);
     const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
     let match;
     while ((match = imageRegex.exec(message)) !== null) {
       const val = match[1].replace(/&amp;/g, "&");
+      console.log(`[QQ] extractImageUrls: matched image url = ${val}`);
       urls.push(val);
       if (urls.length >= maxImages) break;
     }
   }
 
+  console.log(`[QQ] extractImageUrls: returning ${urls.length} urls = ${JSON.stringify(urls)}`);
   return urls;
 }
 
@@ -437,7 +445,10 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             }
 
             if (event.post_type !== "message") return;
-            
+
+            console.log(`[QQ] Received message: message_type=${event.message_type}, raw_message=${event.raw_message?.substring(0, 100)}`);
+            console.log(`[QQ] event.message = ${JSON.stringify(event.message)}`);
+
             // 2. Dynamic self-message filtering
             const selfId = client.getSelfId() || event.self_id;
             if (selfId && String(event.user_id) === String(selfId)) return;
@@ -655,6 +666,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             bodyWithReply = systemBlock + bodyWithReply;
 
             const mediaUrls = extractImageUrls(event.message);
+            console.log(`[QQ] Message from ${userId}@${isGroup ? 'group:' + groupId : 'private'}: mediaUrls = ${JSON.stringify(mediaUrls)}`);
             const ctxPayload = runtime.channel.reply.finalizeInboundContext({
                 Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", Body: bodyWithReply, RawBody: text,
                 SenderId: String(userId), SenderName: event.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
@@ -663,6 +675,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 ...(mediaUrls.length > 0 && { MediaUrls: mediaUrls }),
                 ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
             });
+            console.log(`[QQ] ctxPayload.MediaUrls = ${JSON.stringify(ctxPayload.MediaUrls)}`);
             
             await runtime.channel.session.recordInboundSession({
                 storePath: runtime.channel.session.resolveStorePath(cfg.session?.store, { agentId: "default" }),
