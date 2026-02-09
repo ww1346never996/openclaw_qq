@@ -49,32 +49,42 @@ async function extractImageUrls(
       const segment = message[i];
       console.log(`[QQ] extractImageUrls: segment[${i}] = ${JSON.stringify(segment)}`);
       if (segment.type === "image") {
-        // 优先使用 url 字段
-        let url: string | undefined = segment.data?.url;
-        // 如果没有 url，使用 file 字段
-        if (!url && segment.data?.file) {
-          url = segment.data.file;
-        }
+        let finalUrl: string | undefined;
 
-        // 如果有 file 字段且是文件名格式，尝试调用 get_image API 获取本地路径
-        if (url) {
-          const isImageFileName = /\.(jpg|jpeg|png|gif|webp)$/i.test(url);
-          if (client && !url.startsWith('http') && !url.startsWith('file:') && isImageFileName) {
+        // 优先使用 file 字段调用 get_image API 获取本地路径
+        if (segment.data?.file && client) {
+          const fileName = segment.data.file;
+          const isImageFileName = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileName);
+          if (isImageFileName) {
             try {
-              console.log(`[QQ] extractImageUrls: calling get_image API for ${url}`);
-              const imageInfo = await (client as any).sendWithResponse("get_image", { file: url });
+              console.log(`[QQ] extractImageUrls: calling get_image API for ${fileName}`);
+              const imageInfo = await (client as any).sendWithResponse("get_image", { file: fileName });
               console.log(`[QQ] get_image result: ${JSON.stringify(imageInfo)}`);
               if (imageInfo?.data?.file && String(imageInfo.data.file).startsWith('/')) {
-                url = String(imageInfo.data.file);
-                console.log(`[QQ] extractImageUrls: using local path ${url}`);
+                finalUrl = String(imageInfo.data.file);
+                console.log(`[QQ] extractImageUrls: using local path ${finalUrl}`);
               }
             } catch (e) {
-              console.warn(`[QQ] get_image API failed: ${e}, using original url`);
+              console.warn(`[QQ] get_image API failed: ${e}`);
             }
           }
+        }
 
-          console.log(`[QQ] extractImageUrls: extracted image url = ${url}`);
-          urls.push(url);
+        // 如果 get_image 失败或没有 file 字段，使用 url 字段
+        if (!finalUrl && segment.data?.url) {
+          finalUrl = segment.data.url;
+          console.log(`[QQ] extractImageUrls: using url field ${finalUrl}`);
+        }
+
+        // 如果都没有，使用 file 字段
+        if (!finalUrl && segment.data?.file) {
+          finalUrl = segment.data.file;
+          console.log(`[QQ] extractImageUrls: using file field ${finalUrl}`);
+        }
+
+        if (finalUrl) {
+          console.log(`[QQ] extractImageUrls: extracted final url = ${finalUrl}`);
+          urls.push(finalUrl);
           if (urls.length >= maxImages) break;
         }
       }
