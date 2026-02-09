@@ -35,7 +35,11 @@ function setCachedMemberName(groupId: string, userId: string, name: string) {
     memberCache.set(`${groupId}:${userId}`, { name, time: Date.now() });
 }
 
-function extractImageUrls(message: OneBotMessage | string | undefined, maxImages = 3): string[] {
+async function extractImageUrls(
+  message: OneBotMessage | string | undefined,
+  client: OneBotClient | undefined,
+  maxImages = 3
+): Promise<string[]> {
   const urls: string[] = [];
   console.log(`[QQ] extractImageUrls: input type = ${typeof message}, isArray = ${Array.isArray(message)}`);
 
@@ -46,13 +50,30 @@ function extractImageUrls(message: OneBotMessage | string | undefined, maxImages
       console.log(`[QQ] extractImageUrls: segment[${i}] = ${JSON.stringify(segment)}`);
       if (segment.type === "image") {
         // 优先使用 url 字段
-        let url = segment.data?.url;
-        // 如果没有 url，使用 file 字段（可能是本地路径、文件ID或http地址）
+        let url: string | undefined = segment.data?.url;
+        // 如果没有 url，使用 file 字段
         if (!url && segment.data?.file) {
           url = segment.data.file;
         }
-        console.log(`[QQ] extractImageUrls: extracted image url = ${url}`);
+
+        // 如果有 file 字段且是文件名格式，尝试调用 get_image API 获取本地路径
         if (url) {
+          const isImageFileName = /\.(jpg|jpeg|png|gif|webp)$/i.test(url);
+          if (client && !url.startsWith('http') && !url.startsWith('file:') && isImageFileName) {
+            try {
+              console.log(`[QQ] extractImageUrls: calling get_image API for ${url}`);
+              const imageInfo = await (client as any).sendWithResponse("get_image", { file: url });
+              console.log(`[QQ] get_image result: ${JSON.stringify(imageInfo)}`);
+              if (imageInfo?.data?.file && String(imageInfo.data.file).startsWith('/')) {
+                url = String(imageInfo.data.file);
+                console.log(`[QQ] extractImageUrls: using local path ${url}`);
+              }
+            } catch (e) {
+              console.warn(`[QQ] get_image API failed: ${e}, using original url`);
+            }
+          }
+
+          console.log(`[QQ] extractImageUrls: extracted image url = ${url}`);
           urls.push(url);
           if (urls.length >= maxImages) break;
         }
@@ -668,7 +689,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
             bodyWithReply = systemBlock + bodyWithReply;
 
-            const mediaUrls = extractImageUrls(event.message);
+            const mediaUrls = await extractImageUrls(event.message, client);
             console.log(`[QQ] Message from ${userId}@${isGroup ? 'group:' + groupId : 'private'}: mediaUrls = ${JSON.stringify(mediaUrls)}`);
             const ctxPayload = runtime.channel.reply.finalizeInboundContext({
                 Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", Body: bodyWithReply, RawBody: text,
