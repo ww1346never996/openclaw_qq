@@ -37,11 +37,16 @@ function setCachedMemberName(groupId: string, userId: string, name: string) {
 
 function extractImageUrls(message: OneBotMessage | string | undefined, maxImages = 3): string[] {
   const urls: string[] = [];
-  
+
   if (Array.isArray(message)) {
     for (const segment of message) {
       if (segment.type === "image") {
-        const url = segment.data?.url || (typeof segment.data?.file === 'string' && (segment.data.file.startsWith('http') || segment.data.file.startsWith('base64://')) ? segment.data.file : undefined);
+        // 优先使用 url 字段
+        let url = segment.data?.url;
+        // 如果没有 url，使用 file 字段（可能是本地路径、文件ID或http地址）
+        if (!url && segment.data?.file) {
+          url = segment.data.file;
+        }
         if (url) {
           urls.push(url);
           if (urls.length >= maxImages) break;
@@ -53,13 +58,11 @@ function extractImageUrls(message: OneBotMessage | string | undefined, maxImages
     let match;
     while ((match = imageRegex.exec(message)) !== null) {
       const val = match[1].replace(/&amp;/g, "&");
-      if (val.startsWith("http") || val.startsWith("base64://")) {
-        urls.push(val);
-        if (urls.length >= maxImages) break;
-      }
+      urls.push(val);
+      if (urls.length >= maxImages) break;
     }
   }
-  
+
   return urls;
 }
 
@@ -651,12 +654,13 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
             bodyWithReply = systemBlock + bodyWithReply;
 
+            const mediaUrls = extractImageUrls(event.message);
             const ctxPayload = runtime.channel.reply.finalizeInboundContext({
                 Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", Body: bodyWithReply, RawBody: text,
                 SenderId: String(userId), SenderName: event.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
                 SessionKey: `qq:${fromId}`, AccountId: account.accountId, ChatType: isGroup ? "group" : isGuild ? "channel" : "direct", Timestamp: event.time * 1000,
                 OriginatingChannel: "qq", OriginatingTo: fromId, CommandAuthorized: true,
-                ...(extractImageUrls(event.message).length > 0 && { MediaUrls: extractImageUrls(event.message) }),
+                ...(mediaUrls.length > 0 && { MediaUrls: mediaUrls }),
                 ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
             });
             
