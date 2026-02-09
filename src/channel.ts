@@ -429,6 +429,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         });
 
         client.on("message", async (event) => {
+          console.log(`[QQ] ========== RAW EVENT RECEIVED ==========`);
+          console.log(`[QQ] Raw event: ${JSON.stringify(event, null, 2)}`);
+          console.log(`[QQ] =========================================`);
           try {
             if (event.post_type === "meta_event") {
                  if (event.meta_event_type === "lifecycle" && event.sub_type === "connect" && event.self_id) client.setSelfId(event.self_id);

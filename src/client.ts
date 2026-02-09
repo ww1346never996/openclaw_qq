@@ -58,9 +58,10 @@ export class OneBotClient extends EventEmitter {
           if (payload.post_type === "meta_event" && payload.meta_event_type === "heartbeat") {
             return;
           }
+          console.log(`[QQ Client] Received event: post_type=${payload.post_type}, message_type=${payload.message_type}, user_id=${payload.user_id}, group_id=${payload.group_id}`);
           this.emit("message", payload);
         } catch (err) {
-          // Ignore non-JSON or parse errors
+          console.error("[QQ Client] Failed to parse message:", err);
         }
       });
 
