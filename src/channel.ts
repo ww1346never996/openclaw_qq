@@ -37,71 +37,33 @@ function setCachedMemberName(groupId: string, userId: string, name: string) {
 
 async function extractImageUrls(
   message: OneBotMessage | string | undefined,
-  client: OneBotClient | undefined,
   maxImages = 3
 ): Promise<string[]> {
   const urls: string[] = [];
-  console.log(`[QQ] extractImageUrls: input type = ${typeof message}, isArray = ${Array.isArray(message)}`);
 
   if (Array.isArray(message)) {
-    console.log(`[QQ] extractImageUrls: processing array message, length = ${message.length}`);
-    for (let i = 0; i < message.length; i++) {
-      const segment = message[i];
-      console.log(`[QQ] extractImageUrls: segment[${i}] = ${JSON.stringify(segment)}`);
+    for (const segment of message) {
       if (segment.type === "image") {
-        let finalUrl: string | undefined;
-
-        // 优先使用 file 字段调用 get_image API 获取本地路径
-        if (segment.data?.file && client) {
-          const fileName = segment.data.file;
-          const isImageFileName = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileName);
-          if (isImageFileName) {
-            try {
-              console.log(`[QQ] extractImageUrls: calling get_image API for ${fileName}`);
-              const imageInfo = await (client as any).sendWithResponse("get_image", { file: fileName });
-              console.log(`[QQ] get_image result: ${JSON.stringify(imageInfo)}`);
-              if (imageInfo?.data?.file && String(imageInfo.data.file).startsWith('/')) {
-                finalUrl = String(imageInfo.data.file);
-                console.log(`[QQ] extractImageUrls: using local path ${finalUrl}`);
-              }
-            } catch (e) {
-              console.warn(`[QQ] get_image API failed: ${e}`);
-            }
-          }
-        }
-
-        // 如果 get_image 失败或没有 file 字段，使用 url 字段
-        if (!finalUrl && segment.data?.url) {
-          finalUrl = segment.data.url;
-          console.log(`[QQ] extractImageUrls: using url field ${finalUrl}`);
-        }
-
-        // 如果都没有，使用 file 字段
-        if (!finalUrl && segment.data?.file) {
-          finalUrl = segment.data.file;
-          console.log(`[QQ] extractImageUrls: using file field ${finalUrl}`);
-        }
-
+        const finalUrl = segment.data?.url || segment.data?.file;
+        console.log(`[QQ] extractImageUrls: found image, url=${finalUrl?.substring(0, 80)}...`);
         if (finalUrl) {
-          console.log(`[QQ] extractImageUrls: extracted final url = ${finalUrl}`);
           urls.push(finalUrl);
           if (urls.length >= maxImages) break;
         }
       }
     }
   } else if (typeof message === "string") {
-    console.log(`[QQ] extractImageUrls: processing string message, length = ${message?.length}`);
     const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
     let match;
     while ((match = imageRegex.exec(message)) !== null) {
       const val = match[1].replace(/&amp;/g, "&");
-      console.log(`[QQ] extractImageUrls: matched image url = ${val}`);
+      console.log(`[QQ] extractImageUrls: found image (CQ code), url=${val.substring(0, 80)}...`);
       urls.push(val);
       if (urls.length >= maxImages) break;
     }
   }
 
-  console.log(`[QQ] extractImageUrls: returning ${urls.length} urls = ${JSON.stringify(urls)}`);
+  console.log(`[QQ] extractImageUrls: total ${urls.length} images extracted`);
   return urls;
 }
 
@@ -460,9 +422,6 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         });
 
         client.on("message", async (event) => {
-          console.log(`[QQ] ========== RAW EVENT RECEIVED ==========`);
-          console.log(`[QQ] Raw event: ${JSON.stringify(event, null, 2)}`);
-          console.log(`[QQ] =========================================`);
           try {
             if (event.post_type === "meta_event") {
                  if (event.meta_event_type === "lifecycle" && event.sub_type === "connect" && event.self_id) client.setSelfId(event.self_id);
@@ -480,8 +439,8 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
             if (event.post_type !== "message") return;
 
-            console.log(`[QQ] Received message: message_type=${event.message_type}, raw_message=${event.raw_message?.substring(0, 100)}`);
-            console.log(`[QQ] event.message = ${JSON.stringify(event.message)}`);
+            console.log(`[QQ] message: type=${event.message_type}, hasImage=${Array.isArray(event.message) && event.message.some((s: any) => s.type === "image")}`);
+            console.log(`[QQ] extractImageUrls: processing message, extracting image URLs...`);
 
             // 2. Dynamic self-message filtering
             const selfId = client.getSelfId() || event.self_id;
@@ -699,8 +658,8 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
             bodyWithReply = systemBlock + bodyWithReply;
 
-            const mediaUrls = await extractImageUrls(event.message, client);
-            console.log(`[QQ] Message from ${userId}@${isGroup ? 'group:' + groupId : 'private'}: mediaUrls = ${JSON.stringify(mediaUrls)}`);
+            const mediaUrls = await extractImageUrls(event.message);
+            console.log(`[QQ] MediaUrls=${JSON.stringify(mediaUrls)}`);
             const ctxPayload = runtime.channel.reply.finalizeInboundContext({
                 Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", Body: bodyWithReply, RawBody: text,
                 SenderId: String(userId), SenderName: event.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
@@ -709,7 +668,6 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 ...(mediaUrls.length > 0 && { MediaUrls: mediaUrls }),
                 ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
             });
-            console.log(`[QQ] ctxPayload.MediaUrls = ${JSON.stringify(ctxPayload.MediaUrls)}`);
             
             await runtime.channel.session.recordInboundSession({
                 storePath: runtime.channel.session.resolveStorePath(cfg.session?.store, { agentId: "default" }),
