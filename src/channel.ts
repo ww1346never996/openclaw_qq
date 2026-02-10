@@ -483,7 +483,14 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                         }
                         resolvedText += ` @${name} `;
                     } else if (seg.type === "record") resolvedText += ` [语音消息]${seg.data?.text ? `(${seg.data.text})` : ""}`;
-                    else if (seg.type === "image") resolvedText += " [图片]";
+                    else if (seg.type === "image") {
+                        const imgUrl = seg.data?.url || seg.data?.file;
+                        if (imgUrl) {
+                            resolvedText += ` [图片: ${imgUrl}]`;
+                        } else {
+                            resolvedText += " [图片]";
+                        }
+                    }
                     else if (seg.type === "video") resolvedText += " [视频消息]";
                     else if (seg.type === "json") resolvedText += " [卡片消息]";
                     else if (seg.type === "forward" && seg.data?.id) {
