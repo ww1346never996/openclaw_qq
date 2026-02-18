@@ -14,11 +14,25 @@ import { OneBotClient } from "./client.js";
 import { QQConfigSchema, type QQConfig } from "./config.js";
 import { getQQRuntime } from "./runtime.js";
 import type { OneBotMessage, OneBotMessageSegment } from "./types.js";
+import * as path from "node:path";
+
+const WORKSPACE_IMG_DIR = "/home/admin/.openclaw/workspace/tmp_images";
 
 export type ResolvedQQAccount = ChannelAccountSnapshot & {
   config: QQConfig;
   client?: OneBotClient;
 };
+
+// 👇 新增：消息缓冲池接口和全局 Map
+interface MessageBuffer {
+    timer: NodeJS.Timeout;
+    texts: string[];
+    mediaUrls: string[];
+    lastEvent: any; // 保留最后一次的事件，用于获取发送者状态
+}
+const messageBufferPool = new Map<string, MessageBuffer>();
+// 缓冲等待时间（毫秒）
+const DEBOUNCE_WAIT_MS = 5000;
 
 const memberCache = new Map<string, { name: string, time: number }>();
 
@@ -35,8 +49,17 @@ function setCachedMemberName(groupId: string, userId: string, name: string) {
     memberCache.set(`${groupId}:${userId}`, { name, time: Date.now() });
 }
 
+function getMimeType(filePath: string): string {
+    const ext = filePath.split('.').pop()?.toLowerCase();
+    if (ext === 'png') return 'image/png';
+    if (ext === 'gif') return 'image/gif';
+    if (ext === 'webp') return 'image/webp';
+    return 'image/jpeg';
+}
+
 async function extractImageUrls(
   message: OneBotMessage | string | undefined,
+  client: OneBotClient,
   maxImages = 3
 ): Promise<string[]> {
   const urls: string[] = [];
@@ -44,8 +67,26 @@ async function extractImageUrls(
   if (Array.isArray(message)) {
     for (const segment of message) {
       if (segment.type === "image") {
-        const finalUrl = segment.data?.url || segment.data?.file;
-        console.log(`[QQ] extractImageUrls: found image, url=${finalUrl?.substring(0, 80)}...`);
+        let finalUrl = "";
+        
+        if (segment.data?.file) {
+            try {
+                // 强制要求 NTQQ 提供高清原图
+                const imgInfo = await (client as any).sendWithResponse("get_image", { file: segment.data.file, original: true });
+                if (imgInfo && imgInfo.file) {
+                    // 直接把原始物理路径交给 OpenClaw 底层去转 Base64
+                    finalUrl = `file://${imgInfo.file}`;
+                }
+            } catch (e) {
+                console.warn(`[QQ] 获取图片原图路径失败: ${e}`);
+            }
+        }
+        
+        // 兜底策略
+        if (!finalUrl && segment.data?.url) {
+            finalUrl = segment.data.url;
+        }
+
         if (finalUrl) {
           urls.push(finalUrl);
           if (urls.length >= maxImages) break;
@@ -57,13 +98,11 @@ async function extractImageUrls(
     let match;
     while ((match = imageRegex.exec(message)) !== null) {
       const val = match[1].replace(/&amp;/g, "&");
-      console.log(`[QQ] extractImageUrls: found image (CQ code), url=${val.substring(0, 80)}...`);
       urls.push(val);
       if (urls.length >= maxImages) break;
     }
   }
 
-  console.log(`[QQ] extractImageUrls: total ${urls.length} images extracted`);
   return urls;
 }
 
@@ -88,6 +127,10 @@ function cleanCQCodes(text: string | undefined): string {
   result = result.replace(/\[CQ:[^\]]+\]/g, (match) => {
     if (match.startsWith("[CQ:image")) {
       return "[图片]";
+    }
+    // 👇 新增这三行，给语音放行
+    if (match.startsWith("[CQ:record")) {
+      return match;
     }
     return "";
   });
@@ -482,13 +525,41 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                             }
                         }
                         resolvedText += ` @${name} `;
-                    } else if (seg.type === "record") resolvedText += ` [语音消息]${seg.data?.text ? `(${seg.data.text})` : ""}`;
+                    }else if (seg.type === "record") {
+                        // 提取真实的 url 并拼接成完整的 CQ 码，喂给大模型
+                        const recordUrl = seg.data?.url || "";
+                        const recordFile = seg.data?.file || "";
+                        resolvedText += ` [CQ:record,file=${recordFile},url=${recordUrl}]`;
+                    }
                     else if (seg.type === "image") {
-                        const imgUrl = seg.data?.url || seg.data?.file;
-                        if (imgUrl) {
-                            resolvedText += ` [图片: ${imgUrl}]`;
+                        let safePath = "";
+                        if (seg.data?.file) {
+                             try {
+                                 // 获取原图绝对路径 (加上 original: true 保证高清)
+                                 const imgInfo = await (client as any).sendWithResponse("get_image", { file: seg.data.file, original: true });
+                                 if (imgInfo && imgInfo.file) {
+                                     const originalPath = imgInfo.file;
+                                     const pathModule = await import("node:path");
+                                     const fsModule = await import("node:fs/promises");
+                                     
+                                     // 提取扩展名并重命名
+                                     const ext = pathModule.extname(originalPath) || '.jpg';
+                                     const newFileName = `qq_img_${Date.now()}${ext}`;
+                                     safePath = pathModule.join(WORKSPACE_IMG_DIR, newFileName);
+                                     
+                                     // 确保沙箱目录存在，并把图片复制进去
+                                     await fsModule.mkdir(WORKSPACE_IMG_DIR, { recursive: true });
+                                     await fsModule.copyFile(originalPath, safePath);
+                                     console.log(`[QQ] 成功将图片转存至沙箱白名单: ${safePath}`);
+                                 }
+                             } catch(e) {
+                                 console.warn(`[QQ] 图片转存失败: ${e}`);
+                             }
+                        }
+                        if (safePath) {
+                             resolvedText += `\n[图片已存入工作区: ${safePath}]\n`;
                         } else {
-                            resolvedText += " [图片]";
+                             resolvedText += " [图片]";
                         }
                     }
                     else if (seg.type === "video") resolvedText += " [视频消息]";
@@ -665,26 +736,82 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
             bodyWithReply = systemBlock + bodyWithReply;
 
-            const mediaUrls = await extractImageUrls(event.message);
-            console.log(`[QQ] MediaUrls=${JSON.stringify(mediaUrls)}`);
-            const ctxPayload = runtime.channel.reply.finalizeInboundContext({
-                Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", Body: bodyWithReply, RawBody: text,
-                SenderId: String(userId), SenderName: event.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
-                SessionKey: `qq:${fromId}`, AccountId: account.accountId, ChatType: isGroup ? "group" : isGuild ? "channel" : "direct", Timestamp: event.time * 1000,
-                OriginatingChannel: "qq", OriginatingTo: fromId, CommandAuthorized: true,
-                ...(mediaUrls.length > 0 && { MediaUrls: mediaUrls }),
-                ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
-            });
+            // 获取图片 URL
+            const mediaUrls = await extractImageUrls(event.message, client);
             
-            await runtime.channel.session.recordInboundSession({
-                storePath: runtime.channel.session.resolveStorePath(cfg.session?.store, { agentId: "default" }),
-                sessionKey: ctxPayload.SessionKey!, ctx: ctxPayload,
-                updateLastRoute: { sessionKey: ctxPayload.SessionKey!, channel: "qq", to: fromId, accountId: account.accountId },
-                onRecordError: (err) => console.error("QQ Session Error:", err)
-            });
+            // ==========================================
+            // 👇 核心改造：消息缓冲池防抖逻辑开始
+            // ==========================================
+            const bufferKey = `qq:${fromId}`;
 
-            try { await runtime.channel.reply.dispatchReplyFromConfig({ ctx: ctxPayload, cfg, dispatcher, replyOptions });
-            } catch (error) { if (config.enableErrorNotify) deliver({ text: "⚠️ 服务调用失败，请稍后重试。" }); }
+            // 1. 如果当前会话已经有正在缓冲的消息，先清除它之前的发送倒计时
+            if (messageBufferPool.has(bufferKey)) {
+                clearTimeout(messageBufferPool.get(bufferKey)!.timer);
+            }
+
+            // 2. 获取或初始化这个会话的篮子
+            const currentBuffer = messageBufferPool.get(bufferKey) || {
+                timer: null as any,
+                texts: [],
+                mediaUrls: [],
+                lastEvent: null
+            };
+
+            // 3. 把当前这句话和可能附带的图片扔进篮子，更新最新事件
+            currentBuffer.texts.push(bodyWithReply);
+            currentBuffer.mediaUrls.push(...mediaUrls);
+            currentBuffer.lastEvent = event; 
+
+            // 4. 重新设置倒计时（以你在顶部定义的 DEBOUNCE_WAIT_MS 为准，5秒）
+            currentBuffer.timer = setTimeout(async () => {
+                // 倒计时结束，从池子里把篮子端出来并从全局池中删除
+                const finalBuffer = messageBufferPool.get(bufferKey);
+                if (!finalBuffer) return;
+                messageBufferPool.delete(bufferKey); 
+
+                // 将多句话合并（用换行符隔开），去重图片
+                const combinedBody = finalBuffer.texts.join("\n\n");
+                const combinedMediaUrls = [...new Set(finalBuffer.mediaUrls)];
+                const finalEvent = finalBuffer.lastEvent;
+
+                console.log(`[QQ] 冲刷缓冲池: ${bufferKey}, 合并了 ${finalBuffer.texts.length} 条消息`);
+                if (combinedMediaUrls.length > 0) {
+                    console.log(`[QQ] 冲刷出图片: ${JSON.stringify(combinedMediaUrls)}`);
+                }
+
+                // 组装合并后的 Payload 交给大脑
+                const ctxPayload = runtime.channel.reply.finalizeInboundContext({
+                    Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", 
+                    Body: combinedBody, // 使用合并后的文本
+                    RawBody: finalEvent.raw_message, // 保留最后一次的原始报文即可
+                    SenderId: String(userId), SenderName: finalEvent.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
+                    SessionKey: bufferKey, AccountId: account.accountId, ChatType: isGroup ? "group" : isGuild ? "channel" : "direct", Timestamp: finalEvent.time * 1000,
+                    OriginatingChannel: "qq", OriginatingTo: fromId, CommandAuthorized: true,
+                    ...(combinedMediaUrls.length > 0 && { MediaUrls: combinedMediaUrls }), // 附带合并后的图片
+                    ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
+                });
+                
+                // 记录上下文与触发回答
+                await runtime.channel.session.recordInboundSession({
+                    storePath: runtime.channel.session.resolveStorePath(cfg.session?.store, { agentId: "default" }),
+                    sessionKey: ctxPayload.SessionKey!, ctx: ctxPayload,
+                    updateLastRoute: { sessionKey: ctxPayload.SessionKey!, channel: "qq", to: fromId, accountId: account.accountId },
+                    onRecordError: (err) => console.error("QQ Session Error:", err)
+                });
+
+                try { 
+                    await runtime.channel.reply.dispatchReplyFromConfig({ ctx: ctxPayload, cfg, dispatcher, replyOptions });
+                } catch (error) { 
+                    if (config.enableErrorNotify) deliver({ text: "⚠️ 服务调用失败，请稍后重试。" }); 
+                }
+            }, DEBOUNCE_WAIT_MS); // 5秒等待期
+
+            // 保存或更新当前篮子状态到池子中
+            messageBufferPool.set(bufferKey, currentBuffer);
+            // ==========================================
+            // 👆 缓冲池逻辑结束
+            // ==========================================
+
           } catch (err) {
             console.error("[QQ] Critical error in message handler:", err);
           }
