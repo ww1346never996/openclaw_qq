@@ -57,53 +57,15 @@ function getMimeType(filePath: string): string {
     return 'image/jpeg';
 }
 
+// 👇 将这个函数替换为这个“静音版”
 async function extractImageUrls(
   message: OneBotMessage | string | undefined,
   client: OneBotClient,
   maxImages = 3
 ): Promise<string[]> {
-  const urls: string[] = [];
-
-  if (Array.isArray(message)) {
-    for (const segment of message) {
-      if (segment.type === "image") {
-        let finalUrl = "";
-        
-        if (segment.data?.file) {
-            try {
-                // 强制要求 NTQQ 提供高清原图
-                const imgInfo = await (client as any).sendWithResponse("get_image", { file: segment.data.file, original: true });
-                if (imgInfo && imgInfo.file) {
-                    // 直接把原始物理路径交给 OpenClaw 底层去转 Base64
-                    finalUrl = `file://${imgInfo.file}`;
-                }
-            } catch (e) {
-                console.warn(`[QQ] 获取图片原图路径失败: ${e}`);
-            }
-        }
-        
-        // 兜底策略
-        if (!finalUrl && segment.data?.url) {
-            finalUrl = segment.data.url;
-        }
-
-        if (finalUrl) {
-          urls.push(finalUrl);
-          if (urls.length >= maxImages) break;
-        }
-      }
-    }
-  } else if (typeof message === "string") {
-    const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
-    let match;
-    while ((match = imageRegex.exec(message)) !== null) {
-      const val = match[1].replace(/&amp;/g, "&");
-      urls.push(val);
-      if (urls.length >= maxImages) break;
-    }
-  }
-
-  return urls;
+  // 彻底掐断底层框架自动转 Base64 的原生通道！
+  // 所有的视觉任务现在全部交由正文注入的路径和 AGENTS.md 里的 Python 脚本接管
+  return []; 
 }
 
 function cleanCQCodes(text: string | undefined): string {
@@ -676,6 +638,12 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             const deliver = async (payload: ReplyPayload) => {
                  const send = async (msg: string) => {
                      let processed = msg;
+
+                     // ==========================================
+                     // 👇 补漏：在这里拦截并替换表情短码！
+                     // ==========================================
+                     processed = processed.replace(/\{表情:([a-zA-Z0-9_]+)\}/g, "[CQ:image,file=file:///home/admin/.openclaw/workspace/assets/stickers/saki_$1.png]");
+                     
                      if (config.formatMarkdown) processed = stripMarkdown(processed);
                      if (config.antiRiskMode) processed = processAntiRisk(processed);
                      const chunks = splitMessage(processed, config.maxMessageLength || 4000);
@@ -722,6 +690,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
             const { dispatcher, replyOptions } = runtime.channel.reply.createReplyDispatcherWithTyping({ deliver });
 
+            // 1. 获取基础文本和引用的消息
             let replyToBody = "";
             let replyToSender = "";
             if (replyMsgId && repliedMsg) {
@@ -730,13 +699,11 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             }
 
             const replySuffix = replyToBody ? `\n\n[Replying to ${replyToSender || "unknown"}]\n${replyToBody}\n[/Replying]` : "";
-            let bodyWithReply = cleanCQCodes(text) + replySuffix;
-            let systemBlock = "";
-            if (config.systemPrompt) systemBlock += `<system>${config.systemPrompt}</system>\n\n`;
-            if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
-            bodyWithReply = systemBlock + bodyWithReply;
+            
+            // 👇 修改点 1：只保留用户的纯净发言，绝对不要在这里加 <system> 标签！
+            const pureUserText = cleanCQCodes(text) + replySuffix; 
 
-            // 获取图片 URL
+            // 2. 获取图片 URL
             const mediaUrls = await extractImageUrls(event.message, client);
             
             // ==========================================
@@ -744,12 +711,12 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             // ==========================================
             const bufferKey = `qq:${fromId}`;
 
-            // 1. 如果当前会话已经有正在缓冲的消息，先清除它之前的发送倒计时
+            // 清除旧的发送倒计时
             if (messageBufferPool.has(bufferKey)) {
                 clearTimeout(messageBufferPool.get(bufferKey)!.timer);
             }
 
-            // 2. 获取或初始化这个会话的篮子
+            // 获取或初始化这个会话的篮子
             const currentBuffer = messageBufferPool.get(bufferKey) || {
                 timer: null as any,
                 texts: [],
@@ -757,37 +724,40 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 lastEvent: null
             };
 
-            // 3. 把当前这句话和可能附带的图片扔进篮子，更新最新事件
-            currentBuffer.texts.push(bodyWithReply);
+            // 👇 修改点 2：把纯净无污染的文本推入篮子
+            currentBuffer.texts.push(pureUserText);
             currentBuffer.mediaUrls.push(...mediaUrls);
             currentBuffer.lastEvent = event; 
 
-            // 4. 重新设置倒计时（以你在顶部定义的 DEBOUNCE_WAIT_MS 为准，5秒）
+            // 设置倒计时
             currentBuffer.timer = setTimeout(async () => {
-                // 倒计时结束，从池子里把篮子端出来并从全局池中删除
+                // 倒计时结束，取出篮子
                 const finalBuffer = messageBufferPool.get(bufferKey);
                 if (!finalBuffer) return;
                 messageBufferPool.delete(bufferKey); 
 
-                // 将多句话合并（用换行符隔开），去重图片
-                const combinedBody = finalBuffer.texts.join("\n\n");
-                const combinedMediaUrls = [...new Set(finalBuffer.mediaUrls)];
                 const finalEvent = finalBuffer.lastEvent;
 
+                // 👇 修改点 3：在最终冲刷时，全局只拼接一次系统提示词和历史记录
+                let systemBlock = "";
+                if (config.systemPrompt) systemBlock += `<system>${config.systemPrompt}</system>\n\n`;
+                if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
+
+                // 将多句话合并，并在最顶部统一加上系统上下文
+                const combinedBody = systemBlock + finalBuffer.texts.join("\n\n");
+                const combinedMediaUrls = [...new Set(finalBuffer.mediaUrls)];
+
                 console.log(`[QQ] 冲刷缓冲池: ${bufferKey}, 合并了 ${finalBuffer.texts.length} 条消息`);
-                if (combinedMediaUrls.length > 0) {
-                    console.log(`[QQ] 冲刷出图片: ${JSON.stringify(combinedMediaUrls)}`);
-                }
 
                 // 组装合并后的 Payload 交给大脑
                 const ctxPayload = runtime.channel.reply.finalizeInboundContext({
                     Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", 
-                    Body: combinedBody, // 使用合并后的文本
-                    RawBody: finalEvent.raw_message, // 保留最后一次的原始报文即可
+                    Body: combinedBody, 
+                    RawBody: finalEvent.raw_message, 
                     SenderId: String(userId), SenderName: finalEvent.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
                     SessionKey: bufferKey, AccountId: account.accountId, ChatType: isGroup ? "group" : isGuild ? "channel" : "direct", Timestamp: finalEvent.time * 1000,
                     OriginatingChannel: "qq", OriginatingTo: fromId, CommandAuthorized: true,
-                    ...(combinedMediaUrls.length > 0 && { MediaUrls: combinedMediaUrls }), // 附带合并后的图片
+                    ...(combinedMediaUrls.length > 0 && { MediaUrls: combinedMediaUrls }), 
                     ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
                 });
                 
@@ -804,9 +774,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 } catch (error) { 
                     if (config.enableErrorNotify) deliver({ text: "⚠️ 服务调用失败，请稍后重试。" }); 
                 }
-            }, DEBOUNCE_WAIT_MS); // 5秒等待期
+            }, DEBOUNCE_WAIT_MS);
 
-            // 保存或更新当前篮子状态到池子中
+            // 保存篮子状态
             messageBufferPool.set(bufferKey, currentBuffer);
             // ==========================================
             // 👆 缓冲池逻辑结束
@@ -832,7 +802,14 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
     sendText: async ({ to, text, accountId, replyTo }) => {
         const client = getClientForAccount(accountId || DEFAULT_ACCOUNT_ID);
         if (!client) return { channel: "qq", sent: false, error: "Client not connected" };
-        const chunks = splitMessage(text, 4000);
+        
+        // ==========================================
+        // 👇 核心绝杀：正则拦截大模型的短码，替换为绝对路径
+        // ==========================================
+        let finalOutput = text.replace(/\{表情:([a-zA-Z0-9_]+)\}/g, "[CQ:image,file=file:///home/admin/.openclaw/workspace/assets/stickers/saki_$1.png]");
+
+        // 下面把原来的 text 换成 finalOutput
+        const chunks = splitMessage(finalOutput, 4000);
         for (let i = 0; i < chunks.length; i++) {
             let message: OneBotMessage | string = chunks[i];
             if (replyTo && i === 0) message = [ { type: "reply", data: { id: String(replyTo) } }, { type: "text", data: { text: chunks[i] } } ];
