@@ -743,9 +743,25 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 if (config.systemPrompt) systemBlock += `<system>${config.systemPrompt}</system>\n\n`;
                 if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
 
-                // 将多句话合并，并在最顶部统一加上系统上下文
-                const combinedBody = systemBlock + finalBuffer.texts.join("\n\n");
+                // ==========================================
+                // 👇 结构体重构：阵列化连发消息，强制注意力分配
+                // ==========================================
+                let mergedUserText = "";
+                if (finalBuffer.texts.length > 1) {
+                    // 如果是连发多条，加上明确的分割标签和强指令
+                    const formattedTexts = finalBuffer.texts.map((t, idx) => `[连发消息 ${idx + 1}/总 ${finalBuffer.texts.length}]:\n${t}`);
+                    
+                    // 利用 <notice> 标签给大模型下达“最高通缉令”，逼迫它按条目回复
+                    mergedUserText = `<notice>【系统提示】用户在刚才的 ${DEBOUNCE_WAIT_MS / 1000} 秒内连续发送了以下 ${finalBuffer.texts.length} 条消息。请你务必综合阅读所有内容，并在一次回复中对每一条消息都做出回应，绝不可遗漏！</notice>\n\n` + formattedTexts.join("\n\n");
+                } else {
+                    // 如果只有单条消息，保持原样，不增加额外 Token 负担
+                    mergedUserText = finalBuffer.texts[0];
+                }
+
+                // 将系统上下文与重构后的用户消息合并
+                const combinedBody = systemBlock + mergedUserText;
                 const combinedMediaUrls = [...new Set(finalBuffer.mediaUrls)];
+                // ==========================================
 
                 console.log(`[QQ] 冲刷缓冲池: ${bufferKey}, 合并了 ${finalBuffer.texts.length} 条消息`);
 
